@@ -457,7 +457,7 @@ function wordBody(where){
       : boardView(w.board,box,{show,editable:true,
           onMove:b=>{ const now=Date.now(); if(now-last<250) return; last=now; live={...live,word:{...wl(),box:b}}; lastWrite=now; pendingLive=clone(live); pushLive(); },
           onEnd:b=>setLive({word:{...wl(),box:b}})});
-    return h("div",{class:"wbody"}, h("div",{class:"wcard full"}, h("div",{class:"bholder"},view), h("div",{class:"wlabel sm"},"Find "+w.word+" on your talker")));
+    return h("div",{class:"wbody"}, h("div",{class:"wcard full"}, h("div",{class:"bholder"},view), h("div",{class:"wlabel sm"},"Find "+w.word+" on your core board")));
   }
   if(k==="watch") return h("div",{class:"wbody"}, ytId(w.videoUrl) ? (where==="projector" ? h("div",{class:"wvid"},playerBox()) : h("div",{class:"wcard wbig"},h("div",{class:"wlabel"},"🎬 Watch it"),h("p",{class:"note"},"Use ▶ in the teacher bar."))) : none("Add the video link in Set up the meeting."));
   // find it
