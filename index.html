@@ -188,6 +188,18 @@ select.who{appearance:none;-webkit-appearance:none;border:0;border-radius:10px;p
 .pastebox{min-height:5.5rem;border:3px dashed var(--line);border-radius:14px;background:var(--bg);padding:1rem;margin:.6rem 0;color:var(--muted);font-weight:600;outline:none;cursor:text}
 .pastebox:empty::before{content:attr(data-ph)}
 .pastebox:focus{border-color:var(--news)}
+.symart .sline{display:flex;flex-wrap:wrap;align-items:flex-end;gap:.5em .45em;margin:0 0 1em}
+.symart .sw{display:inline-flex;flex-direction:column;align-items:center;min-width:1.4em}
+.symart .si{height:2.2em;width:2.2em;object-fit:contain;display:block}
+.symart .sw span{font-size:.8em;line-height:1.25;font-weight:600;white-space:nowrap}
+.arthtml.mini.symart{font-size:.4rem}
+.artcredit{position:absolute;left:1vh;bottom:1vh;font-size:1.4vh;color:var(--muted)}
+.symtoggle{display:flex;gap:.6rem;align-items:center;font-weight:600;margin:.4rem 0}
+.symtoggle input{width:1.3rem;height:1.3rem}
+.symtext{width:100%;min-height:7rem;border:2px solid var(--line);background:var(--bg);border-radius:10px;padding:.7rem .8rem;font:inherit;line-height:1.4}
+.wordfix .sym{min-height:6.5rem}
+.wordfix .sym .si{width:3.6rem;height:3.6rem;object-fit:contain}
+.wordfix .sym .nopic{display:grid;place-items:center;width:3.6rem;height:3.6rem;color:var(--muted);font-size:.75rem}
 .artpage{position:absolute;right:1vh;bottom:1vh;background:var(--ink);color:var(--bg);border-radius:999px;padding:.4vh 1.2vh;font-size:1.8vh;font-weight:600}
 .vidcol{min-height:0;display:flex;flex-direction:column;justify-content:center}
 .newsmain.sidelayout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,31vw);gap:2vw}
@@ -392,7 +404,7 @@ let screen = params.get("screen") || ls("am-screen") || null;   // projector | r
 let roster = [], dataVersion = null, settings = {}, content = {};
 let live = {page:"feel", day:"", picks:{}, turn:null, vid:{cmd:"pause", n:0}, news:{q:0, pick:null, reveal:false, art:0}};
 let online = false, started = false, lastWrite = 0, pollTimer = null, quietSince = Date.now();
-let draft = null, editTab = "feel";
+let draft = null, editTab = "feel", symEdit = null;
 let songStatus = {}, myStatus = "", lastStatusSent = 0;
 
 function ls(k,v){ try{ if(v===undefined) return localStorage.getItem(k); v===null?localStorage.removeItem(k):localStorage.setItem(k,v);}catch(e){return null} }
@@ -656,6 +668,71 @@ function cleanArticle(html, dropDataImages){
   return out.innerHTML.replace(/(<p><\/p>)+/g,"").trim();
 }
 const isHtmlPage = pg => pg && typeof pg==="object" && typeof pg.html==="string";
+// Symbol articles: the article's words, each with its ARASAAC symbol above it.
+const isSymPage = pg => pg && typeof pg==="object" && pg.sym===true && typeof pg.text==="string";
+// pull just the words out of a pasted page (News-2-You puts each word in its own table cell)
+function articleText(html){
+  const doc=new DOMParser().parseFromString(html||"","text/html");
+  let out="";
+  (function walk(n){
+    n.childNodes.forEach(c=>{
+      if(c.nodeType===3){ out+=c.textContent; return; }
+      if(c.nodeType!==1) return;
+      const t=c.tagName;
+      if(/^(SCRIPT|STYLE|NOSCRIPT|HEAD|TITLE|BUTTON|SVG)$/.test(t)) return;
+      if(t==="BR"){ out+="\n"; return; }
+      walk(c);
+      if(/^(TD|TH|TR|IMG|SPAN|A)$/.test(t)) out+=" ";
+      else if(/^(P|DIV|H1|H2|H3|H4|LI|TABLE|SECTION|ARTICLE|BLOCKQUOTE|FIGCAPTION)$/.test(t)) out+="\n";
+    });
+  })(doc.body);
+  return out.replace(/[ \t\u00a0]+/g," ").split("\n").map(l=>l.trim()).filter(Boolean).join("\n");
+}
+// the word we look up: lowercase, no punctuation around it, no 's
+function wordKey(tok){ return String(tok||"").toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu,"").replace(/['’]s$/,""); }
+// other forms to try when the exact word has no symbol: dogs → dog, jumped → jump, running → run
+function wordForms(w){
+  const f=[w], dbl=x=>/([b-df-hj-np-tv-z])\1$/.test(x)?x.slice(0,-1):null;
+  if(/ies$/.test(w)) f.push(w.slice(0,-3)+"y");
+  if(/(s|x|z|ch|sh)es$/.test(w)) f.push(w.slice(0,-2));
+  if(/[^s]s$/.test(w)) f.push(w.slice(0,-1));
+  if(/ied$/.test(w)) f.push(w.slice(0,-3)+"y");
+  if(/ed$/.test(w)){ const b=w.slice(0,-2); f.push(b, w.slice(0,-1)); if(dbl(b)) f.push(dbl(b)); }
+  if(/ing$/.test(w)){ const b=w.slice(0,-3); f.push(b, b+"e"); if(dbl(b)) f.push(dbl(b)); }
+  return [...new Set(f)].filter(x=>x.length>1||/^\d$/.test(x)||x==="a"||x==="i");
+}
+async function araBest(term){
+  try{ const r=await fetch(ARA_API+"bestsearch/"+encodeURIComponent(term)); if(!r.ok) return null;
+    const j=await r.json(); const hit=Array.isArray(j)&&j.find(x=>x._id); return hit?ARA_IMG(hit._id):null; }catch(e){ return null; }
+}
+// looked-up symbols are kept on this device so each word is only looked up once
+const wordSym={}, wordWait={}; let symActive=0; const symQueue=[];
+function symRun(){ while(symActive<6 && symQueue.length){ const job=symQueue.shift(); symActive++; job().finally(()=>{ symActive--; symRun(); }); } }
+function wordSymbol(w){
+  if(!w) return Promise.resolve("");
+  if(wordSym[w]!==undefined) return Promise.resolve(wordSym[w]);
+  const c=ls("am-ara-"+w); if(c!==null){ wordSym[w]=c; return Promise.resolve(c); }
+  if(!wordWait[w]) wordWait[w]=new Promise(res=>{ symQueue.push(async()=>{
+    let u=""; for(const f of wordForms(w)){ u=await araBest(f)||""; if(u) break; }
+    wordSym[w]=u; ls("am-ara-"+w,u); res(u); }); symRun(); });
+  return wordWait[w];
+}
+function symPick(pg,w){ const p=(pg.picks||{})[w]; return p===undefined ? undefined : (symUrl(p)||""); }
+// draw a symbol article; a word with no symbol keeps an empty space so the line stays even
+function symArticle(pg, mini){
+  const root=h("div",{class:"arthtml symart"+(mini?" mini":"")});
+  pg.text.split("\n").map(l=>l.trim()).filter(Boolean).forEach(line=>{
+    const row=h("div",{class:"sline"});
+    line.split(/\s+/).forEach(tok=>{
+      const w=wordKey(tok), slot=h("span",{class:"si","aria-hidden":"true"});
+      const put=u=>{ if(!u) return; const img=h("img",{class:"si",src:u,alt:"",onerror:()=>img.replaceWith(h("span",{class:"si"}))}); img.addEventListener("load",placeArticle); slot.replaceWith(img); };
+      if(w){ const p=symPick(pg,w); if(p!==undefined) put(p); else wordSymbol(w).then(put); }
+      row.append(h("span",{class:"sw"},slot,h("span",{},tok)));
+    });
+    root.append(row);
+  });
+  return root;
+}
 // turn a saving error into plain directions
 function whyFailed(e){
   const m=String((e&&e.message)||e||"");
@@ -979,7 +1056,9 @@ function applyNews(){
     if(a!==lastArtShown){
       lastArtShown=a;
       const pg=pages[a];
-      if(isHtmlPage(pg)){
+      if(isSymPage(pg)){
+        doc.replaceChildren(symArticle(pg), h("span",{class:"artcredit"},"Pictograms: ARASAAC (Sergio Palao), CC BY-NC-SA"));
+      } else if(isHtmlPage(pg)){
         const d=h("div",{class:"arthtml"}); d.innerHTML=cleanArticle(pg.html,false);
         d.querySelectorAll("img").forEach(im=>im.addEventListener("load",placeArticle));
         doc.replaceChildren(d);
@@ -1236,7 +1315,7 @@ function remoteNews(wrap){
       h("button",{class:"tb","aria-label":"Next article page",disabled:a>=pages.length-1,onclick:()=>setN({art:a+1,scroll:0})},"Pg ▶"));
     tools.push(h("button",{class:"tb"+(s.zoom?" on":""),onclick:()=>setN({zoom:!s.zoom,scroll:0})},s.zoom?"🔍 Zoom out":"🔍 Zoom"));
     const curPg=pages[Math.max(0,Math.min(s.art||0,pages.length-1))];
-    if(s.zoom || isHtmlPage(curPg)) tools.push(
+    if(s.zoom || isHtmlPage(curPg) || isSymPage(curPg)) tools.push(
       h("button",{class:"tb","aria-label":"Scroll article up",disabled:sc<=0,onclick:()=>setN({scroll:Math.max(0,+(sc-.2).toFixed(2))})},"▲"),
       h("button",{class:"tb","aria-label":"Scroll article down",disabled:sc>=1,onclick:()=>setN({scroll:Math.min(1,+(sc+.2).toFixed(2))})},"▼"));
   }
@@ -1388,16 +1467,20 @@ function editNews(wrap){
   const pages=h("div",{class:"pages"});
   (n.pages||[]).forEach((id,i)=>{
     const th=h("div",{class:"thumb"},"Loading…");
-    if(isHtmlPage(id)){ const d=h("div",{class:"arthtml mini"}); d.innerHTML=cleanArticle(id.html,false); th.replaceChildren(d); }
+    if(isSymPage(id)) th.replaceChildren(symArticle(id,true));
+    else if(isHtmlPage(id)){ const d=h("div",{class:"arthtml mini"}); d.innerHTML=cleanArticle(id.html,false); th.replaceChildren(d); }
     else getFile(id).then(d=>th.replaceChildren(h("img",{src:d,alt:"Article page "+(i+1)}))).catch(()=>{ th.textContent="Couldn't load"; });
     pages.append(h("div",{class:"pagecard"}, th,
       h("div",{class:"ctl"},
         h("button",{class:"icon","aria-label":"Move earlier",disabled:i===0,onclick:()=>{const a=n.pages;[a[i-1],a[i]]=[a[i],a[i-1]];mark();renderEdit();}},"←"),
         h("button",{class:"icon","aria-label":"Remove page",onclick:()=>{ if(confirm("Remove this article page?")){ n.pages.splice(i,1); mark(); renderEdit(); } }},"✕"),
-        h("button",{class:"icon","aria-label":"Move later",disabled:i===n.pages.length-1,onclick:()=>{const a=n.pages;[a[i+1],a[i]]=[a[i],a[i+1]];mark();renderEdit();}},"→"))));
+        h("button",{class:"icon","aria-label":"Move later",disabled:i===n.pages.length-1,onclick:()=>{const a=n.pages;[a[i+1],a[i]]=[a[i],a[i+1]];mark();renderEdit();}},"→")),
+      isSymPage(id) ? h("button",{class:"btn sm",onclick:()=>{ symEdit=i; renderEdit(); }},"Fix symbols")
+      : isHtmlPage(id) ? h("button",{class:"btn sm",onclick:()=>{ const t=articleText(id.html); if(!t){ toast("No words found on that page."); return; } n.pages[i]={sym:true,text:t,picks:{}}; symEdit=i; mark(); renderEdit(); }},"Make symbols") : null));
   });
   wrap.append(h("div",{class:"card"},h("h2",{},"Article"),
     h("p",{class:"note"},"Copy the article in News-2-You and paste it in the box. A copied screenshot works too. Each paste becomes a page your iPad can flip."),
+    h("label",{class:"symtoggle"},h("input",{type:"checkbox",checked:ls("am-symart")!=="0",onchange:e=>ls("am-symart",e.target.checked?"1":"0")}),"Turn pasted words into symbols, word for word"),
     pages,
     h("div",{class:"pastebox",contenteditable:"true",role:"textbox","aria-label":"Paste the article here",
       "data-ph":"Tap or click here, then paste (Ctrl+V on a computer, or tap and hold → Paste on the iPad)",
@@ -1409,6 +1492,8 @@ function editNews(wrap){
       catch(err){ toast(whyFailed(err)); }
       renderEdit();
     }},"+ Add a screenshot file")));
+  const sp=symEdit!=null ? n.pages[symEdit] : null;
+  if(isSymPage(sp)) wrap.append(symFixer(sp, symEdit));
   const qc=h("div",{class:"card"},h("h2",{},"Questions"),
     h("p",{class:"note"},"Tap ✓ on the right answer, or leave none marked for opinion questions. Tap the picture box to find a symbol or upload a picture."));
   (n.questions||[]).forEach((q,qi)=>{
@@ -1558,6 +1643,10 @@ async function pasteArticle(e,n){
   try{
     if(files.length && !html){
       for(const f of files){ const id=await putFile(await shrink(f,1600,230000,false)); draft.uploads.push(id); n.pages.push(id); }
+    } else if((html || text) && ls("am-symart")!=="0"){
+      const t=html ? articleText(html) : text.replace(/[ \t\u00a0]+/g," ").split("\n").map(l=>l.trim()).filter(Boolean).join("\n");
+      if(!t){ toast("No words came through. Try copying the article again, or paste a screenshot."); renderEdit(); return; }
+      n.pages.push({sym:true,text:t,picks:{}}); symEdit=n.pages.length-1;
     } else if(html || text){
       let clean = html ? cleanArticle(html,false) : text.split(/\n{2,}/).map(t=>"<p>"+t.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])).replace(/\n/g,"<br>")+"</p>").join("");
       if(clean.length>40000) clean=cleanArticle(clean,true);       // drop built-in pictures if it's huge
@@ -1568,6 +1657,28 @@ async function pasteArticle(e,n){
     mark(); toast("Added to the article.");
   }catch(err){ toast(whyFailed(err)); }
   renderEdit();
+}
+// fix the words and pick better symbols for one symbol page
+function symFixer(pg, i){
+  pg.picks=pg.picks||{};
+  const words=[...new Set(pg.text.split(/\s+/).map(wordKey).filter(Boolean))];
+  const grid=h("div",{class:"symgrid wordfix"});
+  words.forEach(w=>{
+    const slot=h("span",{class:"nopic"},"…");
+    const show=u=>slot.replaceWith(u ? h("img",{class:"si",src:u,alt:""}) : h("span",{class:"nopic"},"no symbol"));
+    const p=symPick(pg,w); if(p!==undefined) show(p); else wordSymbol(w).then(show);
+    grid.append(h("button",{class:"sym",title:"Change the symbol for "+w,onclick:()=>openPicker(w,false,
+      r=>{ pg.picks[w]=r.url; ls("am-ara-"+w,r.url); wordSym[w]=r.url; mark(); renderEdit(); },
+      ()=>{ delete pg.picks[w]; delete wordSym[w]; ls("am-ara-"+w,null); mark(); renderEdit(); },
+      ()=>{ pg.picks[w]=""; mark(); renderEdit(); })},
+      slot, h("span",{},w)));
+  });
+  return h("div",{class:"card"},
+    h("div",{class:"row",style:{"justify-content":"space-between"}},h("h2",{},"Symbols for page "+(i+1)),h("button",{class:"btn sm",onclick:()=>{ symEdit=null; renderEdit(); }},"Done")),
+    h("p",{class:"note"},"Fix any words that copied wrong, then tap outside the box. Tap a symbol to change it; the change applies everywhere that word appears."),
+    h("textarea",{class:"symtext","aria-label":"Article words",oninput:e=>{ pg.text=e.target.value; mark(); },onchange:()=>renderEdit()},pg.text),
+    grid,
+    h("p",{class:"credit"},"Pictograms: ARASAAC (Sergio Palao), CC BY-NC-SA."));
 }
 function filesIn(n){ const s=new Set((n.pages||[]).filter(p=>typeof p==="string")); (n.questions||[]).forEach(q=>(q.choices||[]).forEach(c=>{ if(c.img&&c.img.file) s.add(c.img.file); })); return s; }
 
